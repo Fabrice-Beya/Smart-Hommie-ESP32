@@ -17,7 +17,7 @@
 #include "addons/RTDBHelper.h"
 
 // Digital pin connected to the DHT sensor
-#define DHTPIN 25 
+#define DHTPIN 4 
 #define DHTTYPE DHT11 
 
 // Initialize DHT sensor
@@ -70,8 +70,8 @@ bool isAuthenticated = false;
 float temperature = 24.7;
 float humidity = 60;
 
-// JSON object to hold update values
-FirebaseJson temperatue_json;
+// JSON object to hold updated sensor values to be sent to firebase
+FirebaseJson temperature_json;
 FirebaseJson humidity_json;
 
 void Wifi_Init() {
@@ -107,7 +107,7 @@ void firebase_init() {
         Serial.println("Success");
         isAuthenticated = true;
 
-        // Set the databae path where updates will be loaded for this device
+        // Set the database path where updates will be loaded for this device
         databasePath = "/" + device_location;
         fuid = auth.token.uid.c_str();
     }
@@ -134,13 +134,15 @@ void setup() {
   dht.begin();
 
   // Initialise temprature and humidity json data
-  temperatue_json.add("deviceuid", DEVICE_UID);
-  temperatue_json.add("name", "DHT11-Temp");
-  temperatue_json.add("type", "Temperature");
-  temperatue_json.add("location", device_location);
-  temperatue_json.add("value", temperature);
+  temperature_json.add("deviceuid", DEVICE_UID);
+  temperature_json.add("name", "DHT11-Temp");
+  temperature_json.add("type", "Temperature");
+  temperature_json.add("location", device_location);
+  temperature_json.add("value", temperature);
+
+  // Print out initial temperature values
   String jsonStr;
-  temperatue_json.toString(jsonStr, true);
+  temperature_json.toString(jsonStr, true);
   Serial.println(jsonStr);
 
   humidity_json.add("deviceuid", DEVICE_UID);
@@ -148,6 +150,8 @@ void setup() {
   humidity_json.add("type", "Humidity");
   humidity_json.add("location", device_location);
   humidity_json.add("value", humidity);
+
+  // Print out initial humidity values
   String jsonStr2;
   humidity_json.toString(jsonStr2, true);
   Serial.println(jsonStr2);
@@ -169,7 +173,7 @@ void updateSensorReadings(){
   Serial.printf("Temperature reading: %.2f \n", temperature);
   Serial.printf("Humidity reading: %.2f \n", humidity);
 
-  temperatue_json.set("value", temperature);
+  temperature_json.set("value", temperature);
   humidity_json.set("value", humidity);
 }
 
@@ -183,7 +187,7 @@ void uploadSensorData() {
       String temperature_node = databasePath + "/temperature";  
       String humidity_node = databasePath + "/humidity";  
 
-      if (Firebase.setJSON(fbdo, temperature_node.c_str(), temperatue_json))
+      if (Firebase.setJSON(fbdo, temperature_node.c_str(), temperature_json))
       {
           Serial.println("PASSED");
           Serial.println("PATH: " + fbdo.dataPath());
