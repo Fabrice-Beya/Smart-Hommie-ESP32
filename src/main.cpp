@@ -10,6 +10,8 @@
 #include <WiFi.h>
 #include <FirebaseESP32.h>
 #include "DHT.h"
+#include "EmonLib.h"
+#include <driver/adc.h>
 
 //Provide the token generation process info.
 #include "addons/TokenHelper.h"
@@ -24,20 +26,41 @@
 DHT dht(DHTPIN, DHTTYPE);
 
 // Device ID
-#define DEVICE_UID "1X"
+#define DEVICE_UID "4X"
 
 // Your WiFi credentials
-#define WIFI_SSID "WIFI_AP"
-#define WIFI_PASSWORD "WIFI_PASSWORD"
+#define WIFI_SSID ""
+#define WIFI_PASSWORD ""
 
 // Your Firebase Project Web API Key
-#define API_KEY "YOUR_API_KEY"
+#define API_KEY ""
 
 // Your Firebase Realtime database URL
 #define DATABASE_URL "https://smart-hommie-default-rtdb.firebaseio.com" //<databaseName>.firebaseio.com or <databaseName>.<region>.firebasedatabase.app
 
+// The GPIO pin were the CT sensor is connected to (should be an ADC input)
+#define ADC_INPUT 34
+
+// The voltage in our apartment. Usually this is 230V in South Africa
+#define HOME_VOLTAGE 230.0
+
+// Force EmonLib to use 10bit ADC resolution
+#define ADC_BITS    10
+#define ADC_COUNTS  (1<<ADC_BITS)
+
+EnergyMonitor emon1;
+
+// Array to store 30 readings (and then transmit in one-go to AWS)
+short measurements[30];
+short measureIndex = 0;
+unsigned long lastMeasurement = 0;
+unsigned long timeFinishedSetup = 0;
+
+// The frequency of energy measurement, every 1000ms
+unsigned long update_energy_interval = 1000;
+
 // Device Location config
-String device_location = "Living Room";
+String device_location = "Main Bedroom";
 
 // Firebase Realtime Database Object
 FirebaseData fbdo;
@@ -69,10 +92,12 @@ bool isAuthenticated = false;
 // Variables to hold sensor readings
 float temperature = 24.7;
 float humidity = 60;
+float watts = 0.0;
 
 // JSON object to hold updated sensor values to be sent to firebase
 FirebaseJson temperature_json;
 FirebaseJson humidity_json;
+FirebaseJson energy_json;
 
 void Wifi_Init() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -124,18 +149,12 @@ void firebase_init() {
     Firebase.begin(&config, &auth);
 }
 
-void setup() {
-  // Initialise serial communication for local diagnostics
-  Serial.begin(115200);
-  // Initialise Connection with location WiFi
-  Wifi_Init();
-  // Initialise firebase configuration and signup anonymously
-  firebase_init();
+void dhtt11_init(){
   dht.begin();
 
-  // Initialise temprature and humidity json data
+  // Initialise temprature json data
   temperature_json.add("deviceuid", DEVICE_UID);
-  temperature_json.add("name", "DHT11-Temp");
+  temperature_json.add("name", "Temperature");
   temperature_json.add("type", "Temperature");
   temperature_json.add("location", device_location);
   temperature_json.add("value", temperature);
@@ -145,24 +164,53 @@ void setup() {
   temperature_json.toString(jsonStr, true);
   Serial.println(jsonStr);
 
+  // Initialise humidity json data
   humidity_json.add("deviceuid", DEVICE_UID);
-  humidity_json.add("name", "DHT11-Hum");
+  humidity_json.add("name", "Humidity");
   humidity_json.add("type", "Humidity");
   humidity_json.add("location", device_location);
   humidity_json.add("value", humidity);
 
-  // Print out initial humidity values
   String jsonStr2;
   humidity_json.toString(jsonStr2, true);
   Serial.println(jsonStr2);
+
+ // Print out initial energy values
+  energy_json.add("deviceuid", DEVICE_UID);
+  energy_json.add("name", "Energy");
+  energy_json.add("type", "Energy");
+  energy_json.add("location", device_location);
+  energy_json.add("value", watts);
+
+  // Print out initial energy values
+  String jsonStr3;
+  energy_json.toString(jsonStr3, true);
+  Serial.println(jsonStr3);
+}
+
+void setup() {
+  adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_11);
+  analogReadResolution(10);
+
+   // Initialize emon library (30 = calibration number)
+  emon1.current(ADC_INPUT, 30);
+
+  // Initialise serial communication for local diagnostics
+  Serial.begin(115200);
+  // Initialise Connection with location WiFi
+  Wifi_Init();
+  // Initialise firebase configuration and signup anonymously
+  firebase_init();
+  // Initialise DHTT11 module
+  dhtt11_init();
 }
 
 void updateSensorReadings(){
   Serial.println("------------------------------------");
   Serial.println("Reading Sensor data ...");
 
-  temperature = dht.readTemperature();
   humidity = dht.readHumidity();
+  temperature = dht.readTemperature();
 
   // Check if any reads failed and exit early (to try again).
   if (isnan(temperature) || isnan(humidity)) {
@@ -177,15 +225,38 @@ void updateSensorReadings(){
   humidity_json.set("value", humidity);
 }
 
+void compute_energy(){
+  // if (millis() - elapsedMillis > update_energy_interval ){
+     elapsedMillis = millis();
+
+    // Calculate Irms only
+    double amps = emon1.calcIrms(1480);
+    watts = amps * HOME_VOLTAGE;
+
+    energy_json.set("value", watts);
+
+    Serial.println("Energy Measurement - ");
+    Serial.print("Amps: ");
+    Serial.println(amps);
+
+    Serial.println("Energy Measurement - ");
+    Serial.print("Watts: ");
+    Serial.println(watts);
+
+  // }
+}
+
 void uploadSensorData() {
   if (millis() - elapsedMillis > update_interval && isAuthenticated && Firebase.ready())
     {
       elapsedMillis = millis();
 
       updateSensorReadings();
+      compute_energy();
 
       String temperature_node = databasePath + "/temperature";  
-      String humidity_node = databasePath + "/humidity";  
+      String humidity_node = databasePath + "/humidity"; 
+      String energy_node = databasePath + "/energy";  
 
       if (Firebase.setJSON(fbdo, temperature_node.c_str(), temperature_json))
       {
@@ -207,6 +278,25 @@ void uploadSensorData() {
       }
 
       if (Firebase.setJSON(fbdo, humidity_node.c_str(), humidity_json))
+      {
+          Serial.println("PASSED");
+          Serial.println("PATH: " + fbdo.dataPath());
+          Serial.println("TYPE: " + fbdo.dataType());
+          Serial.println("ETag: " + fbdo.ETag());
+          Serial.print("VALUE: ");
+          printResult(fbdo); //see addons/RTDBHelper.h
+          Serial.println("------------------------------------");
+          Serial.println();
+      }
+      else
+      {
+          Serial.println("FAILED");
+          Serial.println("REASON: " + fbdo.errorReason());
+          Serial.println("------------------------------------");
+          Serial.println();
+      } 
+
+      if (Firebase.setJSON(fbdo, energy_node.c_str(), energy_json))
       {
           Serial.println("PASSED");
           Serial.println("PATH: " + fbdo.dataPath());
